@@ -1,58 +1,49 @@
-import {isTestnet} from "@/storages/chain";
 import { useParams } from "@solidjs/router";
 import {
   Address,
-  Cell,
   beginCell,
   internal,
   storeMessageRelaxed,
+  toNano,
 } from "@ton/core";
 import {
-  MultisigInfo,
   checkMultisig,
+  checkMultisigOrder,
   MULTISIG_CODE,
   MULTISIG_ORDER_CODE,
-  checkMultisigOrder,
+  MultisigInfo,
   MultisigOrderInfo,
   Op,
 } from "multisig";
 import {
-  For,
-  Match,
-  Switch,
   createEffect,
   createMemo,
   createResource,
   createSignal,
+  For,
+  Match,
+  Switch,
 } from "solid-js";
-import { BlockchainTransaction } from "@ton/sandbox";
-import { parseInternal } from "@truecarry/tlb-abi";
-import { getEmulatedTxInfo } from "@/utils/getEmulatedTxInfo";
-
-type ParsedBlockchainTransaction = BlockchainTransaction & {
-  parsed?: ReturnType<typeof parseInternal>;
-};
-
-const TonStringifier = (input: unknown) =>
-  JSON.stringify(
-    input,
-    (key, value) => {
-      if (value instanceof Cell) {
-        return value.toBoc().toString("base64");
-      }
-      if (value?.type === "Buffer") {
-        return Buffer.from(value.data).toString("base64");
-      }
-      if (value instanceof Address) {
-        return value.toString();
-      }
-      return value;
-    },
-    2,
-  );
+import {
+  addressToString,
+  cn,
+  getEmulatedTxInfo,
+  IsTxGenericSuccess,
+} from "utils";
+import { EmulationResult } from "utils/src/getEmulatedTxInfo";
+import { tonConnectUI } from "@/storages/ton-connect";
+import {
+  multisigAddress,
+  setMultisigAddress,
+} from "@/storages/multisig-address";
+import { isTestnet } from "@/storages/chain";
+import { OrderBalanceSheet } from "@/components/OrderBalanceSheet";
+import { useNavigation } from "@/navigation";
+import { EmulatedTxRow } from "@/components/EmulatedTxRow";
 
 async function fetchMultisig(
   {
+    // eslint-disable-next-line @typescript-eslint/no-shadow
     multisigAddress,
     orderId,
   }: {
@@ -82,11 +73,13 @@ async function fetchMultisig(
     false,
     true,
   );
+  setMultisigAddress(Address.parse(multisigAddress));
 
   return { order: multisig, orderInfo };
 }
 
 async function fetchOrder({
+  // eslint-disable-next-line @typescript-eslint/no-shadow
   multisigAddress,
   order,
   orderInfo,
@@ -94,13 +87,12 @@ async function fetchOrder({
   multisigAddress: string;
   order: MultisigInfo;
   orderInfo: MultisigOrderInfo;
-}) {
+}): Promise<EmulationResult> {
   if (!order) {
-    return [];
+    return undefined;
   }
 
-  const balance = orderInfo.tonBalance;
-
+  const balance = BigInt(orderInfo.tonBalance);
   const msg = internal({
     to: Address.parse(multisigAddress),
     body: beginCell()
@@ -118,22 +110,8 @@ async function fetchOrder({
 
   const msgCell = beginCell().store(storeMessageRelaxed(msg)).endCell();
 
-  const data: Array<ParsedBlockchainTransaction> = await getEmulatedTxInfo(
-    msgCell,
-    true,
-  );
+  const data = await getEmulatedTxInfo(msgCell, true, isTestnet());
 
-  for (let i = 0; i < data.length; i++) {
-    const tx = data[i];
-    if (tx.inMessage.body) {
-      try {
-        const parsed = parseInternal(tx.inMessage.body.asSlice());
-        data[i].parsed = parsed;
-      } catch (e) {
-        //
-      }
-    }
-  }
   return data;
 }
 
@@ -177,6 +155,57 @@ export function MultisigOrderPage() {
     }
   });
 
+  const sendApprove = () => {
+    const myAddress = Address.parse(tonConnectUI().account?.address);
+    if (!myAddress) {
+      return;
+    }
+
+    const mySignerIndex = order().orderInfo.signers.findIndex((address) =>
+      address.address.equals(myAddress),
+    );
+
+    if (mySignerIndex === -1) {
+      return;
+    }
+
+    const DEFAULT_AMOUNT = toNano("0.1"); // 0.1 TON
+    const orderAddressString = addressToString(order().orderInfo.address);
+    const amount = DEFAULT_AMOUNT.toString();
+    const payload = beginCell()
+      .storeUint(0, 32)
+      .storeStringTail("approve")
+      .endCell()
+      .toBoc()
+      .toString("base64");
+
+    console.log({ orderAddressString, amount });
+
+    const transaction = {
+      validUntil: Math.floor(Date.now() / 1000) + 60, // 1 minute
+      messages: [
+        {
+          address: orderAddressString,
+          amount: amount,
+          payload: payload, // raw one-cell BoC encoded in Base64
+        },
+      ],
+    };
+
+    tonConnectUI().sendTransaction(transaction);
+  };
+
+  const emulationErrored = createMemo(() => {
+    return emulatedOrder()?.transactions.some((tx) => !IsTxGenericSuccess(tx));
+  });
+
+  const navigation = useNavigation();
+
+  const goToMultisigPage = () => {
+    navigation.toMultisig(
+      multisigAddress().toString({ urlSafe: true, bounceable: true }),
+    );
+  };
   return (
     <Switch
       fallback={
@@ -205,13 +234,35 @@ export function MultisigOrderPage() {
                 </a>
               </div>
 
-              <div>
-                <For each={emulatedOrder()}>
-                  {(item) => <TxRow item={item} />}
+              <div class="flex items-center my-4">
+                <button
+                  id="order_approveButton"
+                  class={cn(
+                    "bg-[#0088cc] text-white mx-auto",
+                    emulationErrored() && "bg-red-500",
+                  )}
+                  onClick={sendApprove}
+                >
+                  Approve
+                </button>
+              </div>
+
+              <div id="order_approveNote">
+                or just send 0.1 TON with "approve" text comment to order
+                address.
+              </div>
+
+              <OrderBalanceSheet emulated={emulatedOrder} />
+
+              <div class={"flex flex-col gap-4"}>
+                <For each={emulatedOrder()?.transactions}>
+                  {(item) => <EmulatedTxRow item={item} />}
                 </For>
               </div>
             </div>
-            <button id="order_backButton">Back</button>
+            <button id="order_backButton" onClick={goToMultisigPage}>
+              Back
+            </button>
           </div>
         </div>
       }
@@ -236,36 +287,5 @@ export function MultisigOrderPage() {
         </div>
       </Match>
     </Switch>
-  );
-}
-
-function TxRow({ item }: { item: ParsedBlockchainTransaction }) {
-  const to = item?.inMessage?.info?.dest;
-  const from = item?.inMessage?.info?.src ?? "external";
-
-  let computeExit = 0;
-  if (item.description.type === "generic") {
-    if (item.description.computePhase.type === "vm") {
-      computeExit = item.description.computePhase.exitCode;
-    }
-  }
-  return (
-    <div>
-      <div>Transaction</div>
-      <div>From: {from.toString()}</div>
-      <div>To: {to?.toString()}</div>
-
-      <div>
-        Amount:{" "}
-        {item.inMessage.info.type === "internal"
-          ? item.inMessage.info.value.coins.toString()
-          : ""}
-      </div>
-      <div>OutMessagesCount: {item.outMessagesCount}</div>
-      <div>Compute Exit: {computeExit}</div>
-      <div>
-        Parsed: <pre>{TonStringifier(item.parsed)}</pre>
-      </div>
-    </div>
   );
 }
