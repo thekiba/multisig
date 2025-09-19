@@ -46,6 +46,10 @@ import { useNavigation } from "@/navigation";
 import { EmulatedTxRow } from "@/components/EmulatedTxRow";
 import { EmulatedTxGraph } from "@/components/EmulatedTxGraph";
 import { YouBadge } from "@/components/YouBadge";
+import { RuleEvaluationPanel } from "@/components/RuleEvaluationPanel";
+import { RuleSettingsModal } from "@/components/RuleSettingsModal";
+import { RuleEngine, AppliedRule } from "@/utils/rule-engine";
+import { ruleConfig, updateRuleConfig } from "@/storages/rule-config";
 
 async function fetchMultisig(
   {
@@ -140,6 +144,9 @@ export function MultisigOrderPage() {
 
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal(null);
+  const [appliedRules, setAppliedRules] = createSignal<AppliedRule[]>([]);
+  const [rulesLoading, setRulesLoading] = createSignal(false);
+  const [showRuleSettings, setShowRuleSettings] = createSignal(false);
   const [multisigInfo] = createResource(
     { multisigAddress: addressQuery(), orderId: orderIdQuery() },
     fetchMultisig,
@@ -234,6 +241,24 @@ export function MultisigOrderPage() {
     return emulatedOrder()?.transactions.some((tx) => !IsTxGenericSuccess(tx));
   });
 
+  // Rule evaluation effect
+  createEffect(() => {
+    const orderData = order();
+    if (orderData?.orderInfo?.orderCell) {
+      setRulesLoading(true);
+      try {
+        const ruleEngine = new RuleEngine(ruleConfig());
+        const rules = ruleEngine.evaluateOrder(orderData.orderInfo.orderCell);
+        setAppliedRules(rules);
+      } catch (err) {
+        console.error("Rule evaluation failed:", err);
+        setAppliedRules([]);
+      } finally {
+        setRulesLoading(false);
+      }
+    }
+  });
+
   const navigation = useNavigation();
 
   const goToMultisigPage = () => {
@@ -268,27 +293,56 @@ export function MultisigOrderPage() {
       fallback={
         <div id="multisigScreen" class="screen">
           <div class="panel">
-            <button
-              id="order_backButton_top"
-              onClick={goToMultisigPage}
-              class="mb-6 flex items-center text-[#0088cc] hover:text-[#006699] transition-colors duration-200"
-            >
-              <svg
-                class="w-4 h-4 mr-1"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-                xmlns="http://www.w3.org/2000/svg"
+            <div class="mb-6 flex items-center justify-between">
+              <button
+                id="order_backButton_top"
+                onClick={goToMultisigPage}
+                class="flex items-center text-[#0088cc] hover:text-[#006699] transition-colors duration-200"
               >
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  stroke-width="2"
-                  d="M15 19l-7-7 7-7"
-                ></path>
-              </svg>
-              Back to Multisig
-            </button>
+                <svg
+                  class="w-4 h-4 mr-1"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M15 19l-7-7 7-7"
+                  ></path>
+                </svg>
+                Back to Multisig
+              </button>
+
+              <button
+                onClick={() => setShowRuleSettings(true)}
+                class="flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+                title="Configure monitoring rules"
+              >
+                <svg
+                  class="w-4 h-4"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
+                  />
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                  />
+                </svg>
+                Rule Settings
+              </button>
+            </div>
             <div class="bg-white rounded-lg shadow-sm p-6 mb-6">
               <div class="mb-4">
                 <div class="text-sm text-gray-500 mb-1">Order ID:</div>
@@ -380,6 +434,11 @@ export function MultisigOrderPage() {
               </div>
             </div>
 
+            <RuleEvaluationPanel
+              appliedRules={appliedRules()}
+              isLoading={rulesLoading()}
+            />
+
             {!isOrderExecutedOrInvalid() && (
               <>
                 <div class="flex items-center my-4">
@@ -431,6 +490,13 @@ export function MultisigOrderPage() {
               Back
             </button>
           </div>
+
+          <RuleSettingsModal
+            isOpen={showRuleSettings()}
+            onClose={() => setShowRuleSettings(false)}
+            onSave={(config) => updateRuleConfig(config)}
+            currentConfig={ruleConfig()}
+          />
         </div>
       }
     >
